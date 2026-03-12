@@ -135,7 +135,7 @@ function Test-LiveEvent4688 {
     try {
         $arg = "-NoProfile -Command `"Write-Output '$marker' | Out-Null`""
         Start-Process -FilePath "powershell.exe" -ArgumentList $arg `
-                      -WindowStyle Hidden -Wait -NoNewWindow -ErrorAction Stop
+                      -WindowStyle Hidden -Wait -ErrorAction Stop
     }
     catch {
         Write-Log "Failed to spawn test process: $($_.Exception.Message)" -Level WARN
@@ -205,6 +205,12 @@ function Invoke-PreFlight {
         Write-Log 'SYSVOL share -> OK (DC appears promoted)' -Level PASS
     } else {
         Write-Log 'SYSVOL share missing -> DC may not be fully promoted' -Level WARN
+    }
+
+    $cs = Get-WmiObject Win32_ComputerSystem
+    if ($cs.DomainRole -in 4,5) {
+        Write-Log 'Detected Domain Controller - Local audit changes may be overridden by Group Policy (e.g., Default Domain Controllers Policy).' -Level WARN
+        Write-Log 'For persistent changes, configure Advanced Audit Policies in the GPO instead of locally.' -Level WARN
     }
 
     $auditpol = "$env:SystemRoot\System32\auditpol.exe"
@@ -405,18 +411,18 @@ function Invoke-Validation {
     }
     elseif ($r4688.Found) {
         Write-Log 'LIVE 4688 found but NO command line -> FAIL' -Level FAIL
-        Add-Result 'LIVE 4688 + CmdLine' 'FAIL' 'CmdLine field empty (registry/policy not effective yet?)'
+        Add-Result 'LIVE 4688 + CmdLine' 'FAIL' 'CmdLine field empty (registry/policy not effective yet? May need reboot)'
     }
     else {
         Write-Log 'No 4688 event captured -> FAIL' -Level FAIL
-        Add-Result 'LIVE 4688 + CmdLine' 'FAIL' 'No event -> Process Creation audit may not be active'
+        Add-Result 'LIVE 4688 + CmdLine' 'FAIL' 'No event -> Process Creation audit may not be active (check GPO)'
     }
 
     Write-Log 'Running live PowerShell 4104 (script block) test...' -Level HEAD
     $ok4104 = Test-LivePS4104
     $status = if ($ok4104) {'PASS'} else {'FAIL'}
     Write-Log "LIVE 4104 Script Block -> $status" -Level $status
-    Add-Result 'LIVE PS ScriptBlock 4104' $status
+    Add-Result 'LIVE PS ScriptBlock 4104' $status $(if(-not $ok4104){'May need reboot or GPO refresh for registry to take effect'})
 }
 
 function Invoke-AutoFix {
@@ -504,6 +510,8 @@ function Write-FinalReport {
         Write-Log ' 3. Open gpmc.msc -> edit Default Domain Controllers Policy -> verify audit settings' -Level FAIL
         Write-Log ' 4. Live test failures often need reboot or 15-30 min wait' -Level FAIL
         Write-Log ' 5. Confirm you are Domain Admin (not only local admin)' -Level FAIL
+        Write-Log ' 6. If on DC, configure Advanced Audit in GPO: Computer Config > Policies > Windows Settings > Security Settings > Advanced Audit Policy Configuration' -Level FAIL
+        Write-Log ' 7. Enable "Audit: Force audit policy subcategory settings" in GPO Security Options' -Level FAIL
     }
     else {
         Write-Log 'ALL CHECKS PASSED -> DC audit/logging fully configured' -Level PASS
