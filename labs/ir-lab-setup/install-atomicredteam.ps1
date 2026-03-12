@@ -54,7 +54,6 @@ function Get-RealAtomicYamlFiles {
         return @()
     }
 
-    # Exclude index YAMLs because they are not runnable atomic definitions
     return Get-ChildItem $AtomicsRoot -Recurse -File -Include *.yaml, *.yml |
         Where-Object {
             $_.FullName -notmatch '\\Indexes\\' -and
@@ -80,13 +79,8 @@ try {
         Write-Step "Cleaning previous Atomic Red Team install"
         Remove-PathSafe -PathToRemove $InstallRoot
 
-        # Optional module cleanup if older/broken gallery install exists
         $oldInvokeModule = Join-Path $modulePathUser "Invoke-AtomicRedTeam"
-        $oldYamlModule   = Join-Path $modulePathUser "powershell-yaml"
-
         Remove-PathSafe -PathToRemove $oldInvokeModule
-        # Keep powershell-yaml if present; usually harmless. Uncomment next line to fully reset it.
-        # Remove-PathSafe -PathToRemove $oldYamlModule
 
         Write-Ok "Cleanup completed"
     }
@@ -94,9 +88,15 @@ try {
         Write-WarnMsg "SkipCleanup set. Existing files will be reused where possible."
     }
 
-    Write-Step "Setting execution policy for current user"
-    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
-    Write-Ok "Execution policy set to RemoteSigned for CurrentUser"
+    Write-Step "Checking PowerShell execution policy"
+    try {
+        $currentPolicy = Get-ExecutionPolicy -Scope CurrentUser
+        Write-Ok "Current user execution policy: $currentPolicy"
+    }
+    catch {
+        Write-WarnMsg "Could not read execution policy. Continuing."
+        Write-WarnMsg $_.Exception.Message
+    }
 
     Write-Step "Installing required PowerShell modules"
     Install-Module -Name powershell-yaml -Scope CurrentUser -Force -AllowClobber
@@ -190,7 +190,8 @@ catch {
     Write-Host "2. Old partial install caused path conflicts."
     Write-Host "3. Network/download issue interrupted GitHub fetch."
     Write-Host "4. Running non-atomic index YAML files through Get-AtomicTechnique."
-    Write-Host "5. Safe validation test dependency mismatch avoided by using T1059.001-17."
+    Write-Host "5. Execution policy modification blocked by security policy."
+    Write-Host "6. Safe validation test should use T1059.001-17, not AutoIt-based T1059-1."
 
     Write-Host "`n--- Fast Checks ---" -ForegroundColor Yellow
     Write-Host "Test-Path `"$InstallRoot\atomics`""
