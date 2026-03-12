@@ -1,12 +1,12 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Windows Server 2025 Domain Controller - Audit Policy Configurator v2
-    Target : VM4 - Windows Server 2025, Active Directory Domain Controller
+    Windows Server 2025 Domain Controller - Audit Policy Configurator v2.2
+    Target : VM4 - Windows Server 2025 DC
+
 .NOTES
-    Run as Administrator. PowerShell 5.1+ required.
     Author  : Security Engineering Roadmap | github: A-rjun-saji
-    Version : 2.1 - Syntax clean rebuild
+    Version : 2.2 - Fixed auditpol quoting (cmd /c replaced with direct & auditpol.exe)
 #>
 
 [CmdletBinding()]
@@ -42,37 +42,139 @@ function Add-Result {
     $script:Results.Add([PSCustomObject]@{ Control = $Control; Status = $Status; Detail = $Detail })
 }
 
+# FIX v2.2: Use & auditpol.exe with argument array - avoids cmd /c quote collapsing
 function Set-AuditSubcategory {
     param([string]$SubCategory, [bool]$Success, [bool]$Failure)
-    $auditArgs = "/subcategory:`"$SubCategory`""
-    if ($Success) { $auditArgs += ' /success:enable' }
-    if ($Failure) { $auditArgs += ' /failure:enable' }
-    if ($WhatIf) { Write-Log "  [WHATIF] auditpol $auditArgs" -Level WARN; return $true }
-    $null = cmd /c "auditpol $auditArgs 2>&1"
-    return ($LASTEXITCODE -eq 0)
+
+    if ($WhatIf) {
+        Write-Log "  [WHATIF] Would set: $SubCategory (Success=$Success Failure=$Failure)" -Level WARN
+        return $true
+    }
+
+    $argList = @('/subcategory:' + $SubCategory)
+    if ($Success) { $argList += '/success:enable' }
+    if ($Failure)  { $argList += '/failure:enable' }
+
+    try {
+        $output = & auditpol.exe $argList 2>&1
+        if ($LASTEXITCODE -eq 0) { return $true }
+        Write-Log "  [AUDITPOL ERR] $SubCategory : $output" -Level WARN
+        return $false
+    } catch {
+        Write-Log "  [EXCEPTION] $SubCategory : $($_.Exception.Message)" -Level WARN
+        return $false
+    }
 }
 
+function Test-AuditPolSetting {
+    param([string]$Sub, [bool]$NeedSuccess, [bool]$NeedFailure = $false)
+    try {
+        $raw  = & auditpol.exe /get /subcategory:$Sub 2>&1
+        $line = $raw | Where-Object { $_ -match [regex]::Escape($Sub) } | Select-Object -First 1
+        if (-not $line)                                  { return $false }
+        if ($line -match 'No Auditing')                  { return $false }
+        if ($NeedSuccess -and $line -notmatch 'Success') { return $false }
+        if ($NeedFailure -and $line -notmatch 'Failure') { return $false }
+        return $true
+    } catch { return $false }
+}
+
+function Test-RegDWord {
+    param([string]$Path, [string]$Name, [int]$Expected = 1)
+    try { return ((Get-ItemPropertyValue -Path $Path -Name $Name -ErrorAction Stop) -eq $Expected) }
+    catch { return $false }
+}
+
+function Test-LiveEvent4688 {
+    $marker = "DCTest$(Get-Date -Format 'HHmmssff')"
+    $before = (Get-Date).AddSeconds(-1)
+
+    # Spawn a lightweight process with a trackable unique argument
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName               = 'cmd.exe'
+    $psi.Arguments              = "/c echo $marker"
+    $psi.WindowStyle            = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    $psi.CreateNoWindow         = $true
+    $psi.UseShellExecute        = $false
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $proc.WaitForExit()
+    Start-Sleep -Seconds 4
+
+    $events = Get-WinEvent -FilterHashtable @{
+        LogName   = 'Security'
+        Id        = 4688
+        StartTime = $before
+    } -ErrorAction SilentlyContinue
+
+    if (-not $events) { return @{ Found = $false; HasCmdLine = $false } }
+
+    $match      = $events | Where-Object { $_.Message -match $marker }
+    $found      = ($null -ne $match)
+    $hasCmdLine = $false
+    if ($found) {
+        $hasCmdLine = ($match | Select-Object -First 1).Message -match 'Process Command Line\s*:\s*\S+'
+    }
+    return @{ Found = $found; HasCmdLine = $hasCmdLine }
+}
+
+function Test-LivePS4104 {
+    $marker = "PSTest$(Get-Date -Format 'HHmmssff')"
+    $before = (Get-Date).AddSeconds(-1)
+
+    # Use a script block that will definitely trigger 4104
+    $sb = [scriptblock]::Create("Write-Output '$marker'")
+    & $sb | Out-Null
+    Start-Sleep -Seconds 4
+
+    $events = Get-WinEvent -FilterHashtable @{
+        LogName   = 'Microsoft-Windows-PowerShell/Operational'
+        Id        = 4104
+        StartTime = $before
+    } -ErrorAction SilentlyContinue
+
+    if (-not $events) { return $false }
+    return ($null -ne ($events | Where-Object { $_.Message -match $marker }))
+}
+
+# ------------------------------------------------------------------------------
 function Invoke-PreFlight {
     Write-Log 'PHASE 1 - Pre-Flight Checks' -Level HEAD
     $os = Get-CimInstance -ClassName Win32_OperatingSystem
     Write-Log "  OS    : $($os.Caption)"
     Write-Log "  Build : $($os.BuildNumber)"
     Write-Log "  Host  : $env:COMPUTERNAME"
-    if ($os.Caption -notmatch 'Server 2025') { Write-Log "  WARNING: Detected: $($os.Caption)" -Level WARN }
+    Write-Log "  User  : $env:USERNAME"
+
+    if ($os.Caption -notmatch 'Server 2025') {
+        Write-Log "  WARNING: Script targets Server 2025. Detected: $($os.Caption)" -Level WARN
+    }
+
     $sysvolShare = Get-SmbShare -Name 'SYSVOL' -ErrorAction SilentlyContinue
     if ($sysvolShare) { Write-Log '  SYSVOL : OK - DC is functional' -Level PASS }
     else { Write-Log '  SYSVOL : NOT FOUND - DC may not be fully promoted' -Level WARN }
-    Write-Log '  NOTE: Domain GPO takes precedence over local policy on DCs.' -Level WARN
-    if ($PSVersionTable.PSVersion.Major -lt 5) { Write-Log '  FAIL: PowerShell 5.1+ required' -Level FAIL; exit 1 }
+
+    # Verify auditpol.exe is accessible
+    $auditpolPath = "$env:SystemRoot\System32\auditpol.exe"
+    if (Test-Path $auditpolPath) {
+        Write-Log "  auditpol.exe : Found at $auditpolPath" -Level PASS
+    } else {
+        Write-Log '  auditpol.exe : NOT FOUND - cannot continue' -Level FAIL
+        exit 1
+    }
+
+    Write-Log '  NOTE: Domain GPO (Default Domain Controllers Policy) takes precedence over local policy.' -Level WARN
+    if ($PSVersionTable.PSVersion.Major -lt 5) { Write-Log '  FAIL: PS 5.1+ required' -Level FAIL; exit 1 }
     if ($WhatIf) { Write-Log '  MODE : DRY RUN - No changes will be applied' -Level WARN }
 }
 
 function Set-AuditPolicies {
     Write-Log 'PHASE 2 - Configuring DC Audit Policies' -Level HEAD
+
     if (-not $WhatIf) {
-        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name 'SCENoApplyLegacyAuditPolicy' -Value 1 -Type DWord -Force
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' `
+            -Name 'SCENoApplyLegacyAuditPolicy' -Value 1 -Type DWord -Force
     }
-    Write-Log '  SCENoApplyLegacyAuditPolicy = 1'
+    Write-Log '  SCENoApplyLegacyAuditPolicy = 1 (Advanced overrides Basic)'
 
     $policies = @(
         @{ Sub = 'Credential Validation';               S = $true;  F = $true  },
@@ -135,7 +237,7 @@ function Set-RegistryLogging {
     Set-ItemProperty -Path $transPath -Name 'EnableTranscripting'    -Value 1 -Type DWord -Force
     Set-ItemProperty -Path $transPath -Name 'EnableInvocationHeader' -Value 1 -Type DWord -Force
     Set-ItemProperty -Path $transPath -Name 'OutputDirectory'        -Value "$env:SystemDrive\PSTranscripts" -Type String -Force
-    Write-Log "  [SET] PS Transcription output: $env:SystemDrive\PSTranscripts - OK"
+    Write-Log "  [SET] PS Transcription -> $env:SystemDrive\PSTranscripts - OK"
 }
 
 function Set-EventLogSizes {
@@ -150,8 +252,8 @@ function Set-EventLogSizes {
 
     foreach ($l in $logSizes) {
         try {
-            $null = cmd /c "wevtutil sl `"$($l.Log)`" /ms:$($l.Size) /rt:false 2>&1"
-            $mb   = [math]::Round($l.Size / 1MB)
+            & wevtutil.exe sl $l.Log /ms:$($l.Size) /rt:false 2>&1 | Out-Null
+            $mb = [math]::Round($l.Size / 1MB)
             Write-Log "  [SET] $($l.Log) = $mb MB - OK" -Level PASS
         } catch {
             Write-Log "  [ERR] $($l.Log): $($_.Exception.Message)" -Level FAIL
@@ -162,60 +264,9 @@ function Set-EventLogSizes {
 function Invoke-GPUpdate {
     Write-Log 'PHASE 4 - gpupdate /force' -Level HEAD
     if ($WhatIf) { Write-Log '  [WHATIF] Would run: gpupdate /force' -Level WARN; return }
-    $out = cmd /c 'gpupdate /force 2>&1'
-    Write-Log "  $($out[-1])"
+    $out = & gpupdate.exe /force 2>&1
+    Write-Log "  gpupdate: $($out | Select-Object -Last 1)"
     Start-Sleep -Seconds 5
-}
-
-function Test-AuditPolSetting {
-    param([string]$Sub, [bool]$NeedSuccess, [bool]$NeedFailure = $false)
-    $raw  = cmd /c "auditpol /get /subcategory:`"$Sub`" 2>&1"
-    $line = $raw | Where-Object { $_ -match [regex]::Escape($Sub) } | Select-Object -First 1
-    if (-not $line)                                  { return $false }
-    if ($line -match 'No Auditing')                  { return $false }
-    if ($NeedSuccess -and $line -notmatch 'Success') { return $false }
-    if ($NeedFailure -and $line -notmatch 'Failure') { return $false }
-    return $true
-}
-
-function Test-RegDWord {
-    param([string]$Path, [string]$Name, [int]$Expected = 1)
-    try { return ((Get-ItemPropertyValue -Path $Path -Name $Name -ErrorAction Stop) -eq $Expected) }
-    catch { return $false }
-}
-
-function Test-LiveEvent4688 {
-    $marker = "DCTest-$(Get-Date -Format 'HHmmssff')"
-    $before = Get-Date
-    Start-Process -FilePath 'cmd.exe' -ArgumentList "/c echo $marker" -WindowStyle Hidden -Wait
-    Start-Sleep -Seconds 3
-
-    $events = Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4688; StartTime = $before } -ErrorAction SilentlyContinue
-    if (-not $events) { return @{ Found = $false; HasCmdLine = $false } }
-
-    $match      = $events | Where-Object { $_.Message -match [regex]::Escape($marker) }
-    $found      = ($null -ne $match)
-    $hasCmdLine = $false
-    if ($found) {
-        $hasCmdLine = ($match | Select-Object -First 1).Message -match 'Process Command Line\s*:\s*\S+'
-    }
-    return @{ Found = $found; HasCmdLine = $hasCmdLine }
-}
-
-function Test-LivePS4104 {
-    $marker = "PSTest_$(Get-Date -Format 'HHmmssff')"
-    $before = Get-Date
-    Write-Output $marker | Out-Null
-    Start-Sleep -Seconds 3
-
-    $events = Get-WinEvent -FilterHashtable @{
-        LogName   = 'Microsoft-Windows-PowerShell/Operational'
-        Id        = 4104
-        StartTime = $before
-    } -ErrorAction SilentlyContinue
-
-    if (-not $events) { return $false }
-    return ($null -ne ($events | Where-Object { $_.Message -match [regex]::Escape($marker) }))
 }
 
 function Invoke-Validation {
@@ -295,10 +346,10 @@ function Invoke-Validation {
         Add-Result 'LIVE Event 4688 + CmdLine' 'PASS' 'Event found, command line populated'
     } elseif ($live.Found) {
         Write-Log '  LIVE 4688 - FAIL: CmdLine field empty' -Level FAIL
-        Add-Result 'LIVE Event 4688 + CmdLine' 'FAIL' 'CmdLine blank'
+        Add-Result 'LIVE Event 4688 + CmdLine' 'FAIL' 'CmdLine blank - registry key not active'
     } else {
         Write-Log '  LIVE 4688 - FAIL: No event generated' -Level FAIL
-        Add-Result 'LIVE Event 4688 + CmdLine' 'FAIL' 'No 4688 event'
+        Add-Result 'LIVE Event 4688 + CmdLine' 'FAIL' 'No 4688 event - Process Creation audit not active'
     }
 
     Write-Log '  Running live PS Script Block test (Event 4104)...'
@@ -358,19 +409,19 @@ function Invoke-AutoFix {
                 Set-ItemProperty -Path $p -Name 'EnableModuleLogging' -Value 1 -Type DWord -Force
             }
             'Security Log Size' {
-                $null = cmd /c 'wevtutil sl Security /ms:1073741824 /rt:false 2>&1'
+                & wevtutil.exe sl Security /ms:1073741824 /rt:false 2>&1 | Out-Null
             }
             'Directory Service Log Size' {
-                $null = cmd /c 'wevtutil sl "Directory Service" /ms:536870912 /rt:false 2>&1'
+                & wevtutil.exe sl 'Directory Service' /ms:536870912 /rt:false 2>&1 | Out-Null
             }
             'LIVE*' {
-                Write-Log '    Live failure - downstream of above fixes.' -Level FIX
+                Write-Log '    Live failure is downstream - will retest after gpupdate.' -Level FIX
             }
         }
     }
 
     Write-Log '  Re-running gpupdate /force after fixes...' -Level FIX
-    $null = cmd /c 'gpupdate /force 2>&1'
+    & gpupdate.exe /force 2>&1 | Out-Null
     Start-Sleep -Seconds 5
 
     Write-Log 'PHASE 6B - Re-Validation' -Level HEAD
@@ -403,21 +454,22 @@ function Write-FinalReport {
     Write-Log '======================================================'
 
     if ($fail -gt 0) {
-        Write-Log '  REMAINING FAILURES - DC Manual Checklist:' -Level FAIL
-        Write-Log '  1. Confirm running as Domain Admin' -Level FAIL
-        Write-Log '  2. Check Default Domain Controllers Policy in GPMC' -Level FAIL
-        Write-Log '  3. Verify Event Log service: sc query eventlog' -Level FAIL
-        Write-Log '  4. Directory Service log missing? DC may not be fully promoted' -Level FAIL
-        Write-Log '  5. Kerberos subcategories only apply on actual DCs' -Level FAIL
-        Write-Log '  6. Reboot may be required for Server 2025 registry changes' -Level FAIL
+        Write-Log '  REMAINING FAILURES - Manual Checklist:' -Level FAIL
+        Write-Log '  1. Confirm running as Domain Admin (not just local admin)' -Level FAIL
+        Write-Log '  2. If auditpol subcategories still fail, run manually:' -Level FAIL
+        Write-Log '     auditpol.exe /subcategory:"Credential Validation" /success:enable /failure:enable' -Level FAIL
+        Write-Log '  3. Check Default Domain Controllers Policy in GPMC' -Level FAIL
+        Write-Log '     (Domain GPO overrides local audit policy on DCs)' -Level FAIL
+        Write-Log '  4. Verify Event Log service: sc query eventlog' -Level FAIL
+        Write-Log '  5. Reboot and re-run if registry changes not applied' -Level FAIL
     } else {
-        Write-Log '  ALL CONTROLS VERIFIED. DC logging operational.' -Level PASS
-        Write-Log '  Active: 4624,4625,4634,4662,4672,4688,4706,4719,4720,4726,4728,4738,4740,4741,4768,4769,4771,5136,4104' -Level PASS
+        Write-Log '  ALL CONTROLS VERIFIED. DC logging fully operational.' -Level PASS
+        Write-Log '  Active IDs: 4624,4625,4634,4662,4672,4688,4706,4719,4720,4726,4728,4738,4740,4741,4768,4769,4771,5136,4104' -Level PASS
     }
 }
 
 # ENTRY POINT
-Write-Log 'Windows Server 2025 DC Audit Policy Configurator v2.1 - Starting' -Level HEAD
+Write-Log 'Windows Server 2025 DC Audit Policy Configurator v2.2 - Starting' -Level HEAD
 Invoke-PreFlight
 Set-AuditPolicies
 Set-RegistryLogging
