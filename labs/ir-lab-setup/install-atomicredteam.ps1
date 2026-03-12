@@ -161,18 +161,18 @@ try {
 
     Write-Step "Showing details for a safe example technique"
     try {
-        Invoke-AtomicTest T1059 -ShowDetailsBrief
-        Write-Ok "Technique detail lookup for T1059 succeeded"
+        Invoke-AtomicTest T1059.001 -ShowDetailsBrief
+        Write-Ok "Technique detail lookup for T1059.001 succeeded"
     }
     catch {
-        Write-WarnMsg "T1059 detail lookup failed. This does not necessarily mean install failed."
+        Write-WarnMsg "T1059.001 detail lookup failed. This does not necessarily mean install failed."
         Write-WarnMsg $_.Exception.Message
     }
 
     if ($RunSafeTest) {
-        Write-Step "Running one safe Atomic test example: T1059 test 1"
+        Write-Step "Running one safe Atomic test example: T1059.001 test 17"
         Write-WarnMsg "This will generate activity on the endpoint and may trigger AV/EDR/Wazuh alerts."
-        Invoke-AtomicTest T1059 -TestNumbers 1
+        Invoke-AtomicTest T1059.001 -TestNumbers 17
         Write-Ok "Safe test execution completed"
     }
     else {
@@ -190,6 +190,7 @@ catch {
     Write-Host "2. Old partial install caused path conflicts."
     Write-Host "3. Network/download issue interrupted GitHub fetch."
     Write-Host "4. Running non-atomic index YAML files through Get-AtomicTechnique."
+    Write-Host "5. Safe validation test dependency mismatch avoided by using T1059.001-17."
 
     Write-Host "`n--- Fast Checks ---" -ForegroundColor Yellow
     Write-Host "Test-Path `"$InstallRoot\atomics`""
