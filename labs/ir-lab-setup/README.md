@@ -10,7 +10,6 @@ All scripts target VM2 (Windows 10 Enterprise) and VM4 (Windows Server 2025 DC).
 | Document | Description |
 |---|---|
 | [IR Lab Setup Guide — Section 1](./ir-lab-setup-guide-section1.pdf) | Full lab build guide — VM setup, network config, tool installation, audit policy, MITRE ATT&CK coverage |
-| [Incident Response Foundations Guide](./incident-response-foundations-guide.pdf) | IR theory — NIST SP 800-61 framework, incident lifecycle, response phases |
 
 ---
 
