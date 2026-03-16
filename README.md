@@ -1,4 +1,4 @@
-# Security Engineering Roadmap 2026 – Arjun Saji
+# Security Engineering Roadmap 2026 
 
 Personal structured learning journey from **SOC Analyst** (L1 FortiSIEM experience) to **Security / Cybersecurity Engineer**.  
 This repository tracks notes, labs, hands-on projects, scripts, templates, case studies, and proofs across 11 phases — from IR foundations to cloud, automation, DevSecOps, and governance.
